@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/alekspetrov/pilot/internal/adapters/github"
+	"github.com/alekspetrov/pilot/internal/adapters/jira"
 	"github.com/alekspetrov/pilot/internal/adapters/linear"
 	"github.com/alekspetrov/pilot/internal/adapters/slack"
 	"github.com/alekspetrov/pilot/internal/adapters/telegram"
@@ -27,9 +28,11 @@ type Pilot struct {
 	orchestrator *orchestrator.Orchestrator
 	linearClient *linear.Client
 	linearWH     *linear.WebhookHandler
-	githubClient *github.Client
-	githubWH     *github.WebhookHandler
-	githubNotify *github.Notifier
+	githubClient   *github.Client
+	githubWH       *github.WebhookHandler
+	githubNotify   *github.Notifier
+	jiraClient     *jira.Client
+	jiraWH         *jira.WebhookHandler
 	slackNotify    *slack.Notifier
 	slackClient    *slack.Client
 	telegramClient *telegram.Client
@@ -108,6 +111,22 @@ func New(cfg *config.Config) (*Pilot, error) {
 		p.githubNotify = github.NewNotifier(p.githubClient, cfg.Adapters.Github.PilotLabel)
 	}
 
+	// Initialize Jira adapter if enabled
+	if cfg.Adapters.Jira != nil && cfg.Adapters.Jira.Enabled {
+		p.jiraClient = jira.NewClient(
+			cfg.Adapters.Jira.BaseURL,
+			cfg.Adapters.Jira.Username,
+			cfg.Adapters.Jira.APIToken,
+			cfg.Adapters.Jira.Platform,
+		)
+		p.jiraWH = jira.NewWebhookHandler(
+			p.jiraClient,
+			cfg.Adapters.Jira.WebhookSecret,
+			cfg.Adapters.Jira.PilotLabel,
+		)
+		p.jiraWH.OnIssue(p.handleJiraIssue)
+	}
+
 	// Initialize alerts engine if enabled
 	if cfg.Alerts != nil && cfg.Alerts.Enabled {
 		p.initAlerts(cfg)
@@ -130,6 +149,14 @@ func New(cfg *config.Config) (*Pilot, error) {
 			eventType, _ := payload["_event_type"].(string)
 			if err := p.githubWH.Handle(ctx, eventType, payload); err != nil {
 				logging.WithComponent("pilot").Error("GitHub webhook error", slog.Any("error", err))
+			}
+		})
+	}
+
+	if p.jiraWH != nil {
+		p.gateway.Router().RegisterWebhookHandler("jira", func(payload map[string]interface{}) {
+			if err := p.jiraWH.Handle(ctx, payload); err != nil {
+				logging.WithComponent("pilot").Error("Jira webhook error", slog.Any("error", err))
 			}
 		})
 	}
@@ -337,6 +364,34 @@ func (p *Pilot) findProjectForGithubRepo(repo *github.Repository) string {
 	}
 
 	return ""
+}
+
+// handleJiraIssue handles a new Jira issue
+func (p *Pilot) handleJiraIssue(ctx context.Context, issue *jira.Issue) error {
+	logging.WithComponent("pilot").Info("Received Jira issue",
+		slog.String("key", issue.Key),
+		slog.String("summary", issue.Fields.Summary))
+
+	// Get base URL from config
+	baseURL := ""
+	if p.config.Adapters.Jira != nil {
+		baseURL = p.config.Adapters.Jira.BaseURL
+	}
+
+	// Convert to task
+	task := jira.ConvertIssueToTask(issue, baseURL)
+
+	// Find project - use first configured project as default
+	projectPath := ""
+	if len(p.config.Projects) > 0 {
+		projectPath = p.config.Projects[0].Path
+	}
+	if projectPath == "" {
+		return fmt.Errorf("no project configured for Jira issue %s", issue.Key)
+	}
+
+	// Process ticket through orchestrator
+	return p.orchestrator.ProcessJiraTicket(ctx, task, projectPath)
 }
 
 // initAlerts initializes the alerts engine with configured channels
