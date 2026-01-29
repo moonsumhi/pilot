@@ -187,13 +187,18 @@ func (o *Orchestrator) processTask(task *Task) {
 	}
 
 	// Execute task
+	priority := task.Priority
+	if priority == 0 && task.Ticket != nil {
+		priority = float64(task.Ticket.Priority)
+	}
 	execTask := &executor.Task{
 		ID:          task.ID,
 		Title:       task.Document.Title,
 		Description: task.Document.Markdown,
-		Priority:    task.Ticket.Priority,
+		Priority:    int(priority),
 		ProjectPath: task.ProjectPath,
 		Branch:      task.Branch,
+		CreatePR:    true,
 	}
 
 	result, err := o.runner.Execute(o.ctx, execTask)
