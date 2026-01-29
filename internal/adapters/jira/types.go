@@ -1,5 +1,67 @@
 package jira
 
+import (
+	"encoding/json"
+	"strings"
+)
+
+// DescriptionField handles both string and ADF (Atlassian Document Format) descriptions
+type DescriptionField string
+
+// UnmarshalJSON handles both string and ADF object for description
+func (d *DescriptionField) UnmarshalJSON(data []byte) error {
+	// Try to unmarshal as string first
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*d = DescriptionField(s)
+		return nil
+	}
+
+	// Try to unmarshal as ADF object
+	var adf map[string]interface{}
+	if err := json.Unmarshal(data, &adf); err == nil {
+		*d = DescriptionField(extractADFText(adf))
+		return nil
+	}
+
+	// If both fail, set to empty string
+	*d = ""
+	return nil
+}
+
+// String returns the description as a string
+func (d DescriptionField) String() string {
+	return string(d)
+}
+
+// extractADFText extracts plain text from Atlassian Document Format
+func extractADFText(adf map[string]interface{}) string {
+	var sb strings.Builder
+	extractADFTextRecursive(adf, &sb)
+	return strings.TrimSpace(sb.String())
+}
+
+// extractADFTextRecursive recursively extracts text from ADF nodes
+func extractADFTextRecursive(node map[string]interface{}, sb *strings.Builder) {
+	if text, ok := node["text"].(string); ok {
+		sb.WriteString(text)
+	}
+
+	if content, ok := node["content"].([]interface{}); ok {
+		for _, item := range content {
+			if itemMap, ok := item.(map[string]interface{}); ok {
+				extractADFTextRecursive(itemMap, sb)
+			}
+		}
+		// Add newline for block elements
+		if nodeType, ok := node["type"].(string); ok {
+			if nodeType == "paragraph" || nodeType == "heading" || nodeType == "listItem" {
+				sb.WriteString("\n")
+			}
+		}
+	}
+}
+
 // Config holds Jira adapter configuration
 type Config struct {
 	Enabled       bool   `yaml:"enabled"`
@@ -9,6 +71,7 @@ type Config struct {
 	APIToken      string `yaml:"api_token"`      // API token (both Cloud and Server)
 	WebhookSecret string `yaml:"webhook_secret"` // For HMAC signature verification
 	PilotLabel    string `yaml:"pilot_label"`
+	CallbackURL   string `yaml:"callback_url"` // URL to notify when task completes
 	Transitions   struct {
 		InProgress string `yaml:"in_progress"` // Jira transition ID
 		Done       string `yaml:"done"`        // Jira transition ID
@@ -95,17 +158,17 @@ type Issue struct {
 
 // Fields represents Jira issue fields
 type Fields struct {
-	Summary     string        `json:"summary"`
-	Description string        `json:"description"`
-	IssueType   IssueType     `json:"issuetype"`
-	Status      Status        `json:"status"`
-	Priority    *JiraPriority `json:"priority,omitempty"`
-	Labels      []string      `json:"labels"`
-	Assignee    *User         `json:"assignee,omitempty"`
-	Reporter    *User         `json:"reporter,omitempty"`
-	Project     Project       `json:"project"`
-	Created     string        `json:"created"`
-	Updated     string        `json:"updated"`
+	Summary     string          `json:"summary"`
+	Description DescriptionField `json:"description"`
+	IssueType   IssueType       `json:"issuetype"`
+	Status      Status          `json:"status"`
+	Priority    *JiraPriority   `json:"priority,omitempty"`
+	Labels      []string        `json:"labels"`
+	Assignee    *User           `json:"assignee,omitempty"`
+	Reporter    *User           `json:"reporter,omitempty"`
+	Project     Project         `json:"project"`
+	Created     string          `json:"created"`
+	Updated     string          `json:"updated"`
 }
 
 // IssueType represents a Jira issue type

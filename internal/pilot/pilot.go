@@ -372,10 +372,12 @@ func (p *Pilot) handleJiraIssue(ctx context.Context, issue *jira.Issue) error {
 		slog.String("key", issue.Key),
 		slog.String("summary", issue.Fields.Summary))
 
-	// Get base URL from config
+	// Get base URL and callback URL from config
 	baseURL := ""
+	callbackURL := ""
 	if p.config.Adapters.Jira != nil {
 		baseURL = p.config.Adapters.Jira.BaseURL
+		callbackURL = p.config.Adapters.Jira.CallbackURL
 	}
 
 	// Convert to task
@@ -391,7 +393,7 @@ func (p *Pilot) handleJiraIssue(ctx context.Context, issue *jira.Issue) error {
 	}
 
 	// Process ticket through orchestrator
-	return p.orchestrator.ProcessJiraTicket(ctx, task, projectPath)
+	return p.orchestrator.ProcessJiraTicket(ctx, task, projectPath, callbackURL)
 }
 
 // initAlerts initializes the alerts engine with configured channels

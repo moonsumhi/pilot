@@ -1,12 +1,16 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/alekspetrov/pilot/internal/adapters/github"
 	"github.com/alekspetrov/pilot/internal/adapters/jira"
@@ -47,6 +51,8 @@ type Task struct {
 	ProjectPath string
 	Branch      string
 	Priority    float64
+	IssueKey    string // Original issue key (e.g., PROJ-123)
+	CallbackURL string // URL to notify when task completes
 }
 
 // NewOrchestrator creates a new orchestrator
@@ -208,6 +214,8 @@ func (o *Orchestrator) processTask(task *Task) {
 		if o.notifier != nil {
 			_ = o.notifier.TaskFailed(o.ctx, task.ID, task.Document.Title, err.Error())
 		}
+		// Send callback for failure
+		o.sendCallback(task, "failed", "", err.Error())
 		return
 	}
 
@@ -217,6 +225,8 @@ func (o *Orchestrator) processTask(task *Task) {
 		if o.notifier != nil {
 			_ = o.notifier.TaskFailed(o.ctx, task.ID, task.Document.Title, result.Error)
 		}
+		// Send callback for failure
+		o.sendCallback(task, "failed", "", result.Error)
 		return
 	}
 
@@ -227,6 +237,9 @@ func (o *Orchestrator) processTask(task *Task) {
 	if o.notifier != nil {
 		_ = o.notifier.TaskCompleted(o.ctx, task.ID, task.Document.Title, result.PRUrl)
 	}
+
+	// Send callback for success
+	o.sendCallback(task, "completed", result.PRUrl, "")
 }
 
 // handleProgress handles progress updates from the executor
@@ -328,7 +341,7 @@ func (o *Orchestrator) ProcessGithubTicket(ctx context.Context, task *github.Tas
 }
 
 // ProcessJiraTicket processes a new ticket from Jira
-func (o *Orchestrator) ProcessJiraTicket(ctx context.Context, task *jira.TaskInfo, projectPath string) error {
+func (o *Orchestrator) ProcessJiraTicket(ctx context.Context, task *jira.TaskInfo, projectPath, callbackURL string) error {
 	// Convert Jira task to task document via bridge
 	ticket := &TicketData{
 		ID:          task.ID,
@@ -356,10 +369,58 @@ func (o *Orchestrator) ProcessJiraTicket(ctx context.Context, task *jira.TaskInf
 		ProjectPath: projectPath,
 		Branch:      fmt.Sprintf("pilot/%s", task.IssueKey),
 		Priority:    float64(task.Priority),
+		IssueKey:    task.IssueKey,
+		CallbackURL: callbackURL,
 	}
 
 	// Queue task
 	o.QueueTask(internalTask)
 
 	return nil
+}
+
+// sendCallback sends a completion callback to the configured URL
+func (o *Orchestrator) sendCallback(task *Task, status, prURL, errMsg string) {
+	if task.CallbackURL == "" {
+		return
+	}
+
+	payload := map[string]interface{}{
+		"task_id":   task.ID,
+		"issue_key": task.IssueKey,
+		"status":    status,
+	}
+	if prURL != "" {
+		payload["pr_url"] = prURL
+	}
+	if errMsg != "" {
+		payload["error"] = errMsg
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		logging.WithTask(task.ID).Warn("Failed to marshal callback payload", slog.Any("error", err))
+		return
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequestWithContext(o.ctx, http.MethodPost, task.CallbackURL, bytes.NewReader(body))
+	if err != nil {
+		logging.WithTask(task.ID).Warn("Failed to create callback request", slog.Any("error", err))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		logging.WithTask(task.ID).Warn("Failed to send callback", slog.Any("error", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		logging.WithTask(task.ID).Warn("Callback returned error", slog.Int("status", resp.StatusCode))
+	} else {
+		logging.WithTask(task.ID).Info("Callback sent successfully", slog.String("url", task.CallbackURL))
+	}
 }
